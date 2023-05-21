@@ -3,9 +3,11 @@ use async_stream::try_stream;
 use bytes::{Buf, BytesMut};
 use clap::{Parser, Subcommand};
 use futures::{future::join_all, SinkExt, TryStreamExt};
+use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use rkyv::{from_bytes, to_bytes, Archive, Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    fmt::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     time::Instant,
@@ -117,6 +119,9 @@ struct Args {
     #[clap(short, long, default_value_t = Level::INFO)]
     /// Logging level
     log_level: Level,
+    #[clap(short, long, default_value_t = false)]
+    /// Whether to not print anything
+    quiet: bool,
     #[clap(subcommand)]
     command: Commands,
 }
@@ -556,6 +561,27 @@ async fn receive(args: Receive) -> Result<()> {
     let mut bytes_received = 0;
 
     let start_time = Instant::now();
+    let m = MultiProgress::new();
+    let mstyle = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] ({msg:<12.cyan/blue}) [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
+        .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+        .progress_chars("#>-");
+
+    let pbs = files
+        .1
+        .iter()
+        .map(|fd| {
+            let pb = m.add(ProgressBar::new(fd.size as u64));
+            pb.set_message(
+                PathBuf::from(&fd.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            pb.set_style(mstyle.clone());
+            (fd.identifier.clone(), pb)
+        })
+        .collect::<HashMap<FileIdentifier, ProgressBar>>();
 
     loop {
         let message = stream.try_next().await?;
@@ -565,7 +591,17 @@ async fn receive(args: Receive) -> Result<()> {
                 bail!("Received unexpected file listing");
             }
             Some(Message::FileChunk(file_chunk)) => {
+                if let Some(pb) = pbs.get(&file_chunk.identifier) {
+                    pb.inc(file_chunk.data.len() as u64);
+
+                    if file_chunk.data.is_empty() {
+                        pb.finish_and_clear();
+                        m.remove(pb);
+                    }
+                }
+
                 bytes_received += file_chunk.data.len();
+
                 if let Some((tx, _)) = channels.get_mut(&file_chunk.identifier) {
                     let identifier = file_chunk.identifier.clone();
                     tx.send(file_chunk).or_else(|e| {
@@ -595,15 +631,11 @@ async fn receive(args: Receive) -> Result<()> {
         }
     });
 
+    m.clear()?;
+
     let stop_time = Instant::now();
 
     let duration = stop_time - start_time;
-
-    println!(
-        "Received {} bytes in {}s",
-        bytes_received,
-        duration.as_secs_f32()
-    );
 
     Ok(())
 }
