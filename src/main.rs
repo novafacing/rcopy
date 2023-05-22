@@ -4,6 +4,7 @@ use bytes::{Buf, BytesMut};
 use clap::{Parser, Subcommand};
 use futures::{future::join_all, SinkExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
+use local_ip_address::list_afinet_netifas;
 use rkyv::{from_bytes, to_bytes, Archive, Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -11,6 +12,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
 };
+use tabled::{builder::Builder, settings::Style};
 use tokio::{
     fs::{create_dir_all, read_dir},
     net::{TcpListener, TcpStream},
@@ -282,21 +284,46 @@ impl Encoder<Message> for MessageCodec {
     }
 }
 
-async fn listen_one(port: u16, local: bool) -> Result<Framed<TcpStream, MessageCodec>> {
-    let mut listener = TcpListenerStream::new(
-        TcpListener::bind(SocketAddr::new(
-            IpAddr::V4(if local {
-                Ipv4Addr::new(127, 0, 0, 1)
-            } else {
-                Ipv4Addr::new(0, 0, 0, 0)
-            }),
-            port,
-        ))
-        .await?,
-    );
+async fn listen_one(
+    port: u16,
+    local: bool,
+    quiet: bool,
+) -> Result<Framed<TcpStream, MessageCodec>> {
+    let listener = TcpListener::bind(SocketAddr::new(
+        IpAddr::V4(if local {
+            Ipv4Addr::new(127, 0, 0, 1)
+        } else {
+            Ipv4Addr::new(0, 0, 0, 0)
+        }),
+        port,
+    ))
+    .await?;
 
+    if !quiet {
+        if local {
+            println!("👾 Waiting for a connection on interfaces...");
+            println!("📡 Listening on {}:{}", listener.local_addr()?.ip(), port);
+        } else {
+            let mut table_builder = Builder::default();
+            table_builder.set_header(vec!["📡 Interfaces", "Addresses"]);
+            list_afinet_netifas()?
+                .iter()
+                .filter(|(name, _)| !name.starts_with("lo"))
+                .map(|(name, addr)| vec![name.to_string(), format!("{}:{}", addr, port)])
+                .for_each(|row| {
+                    table_builder.push_record(row);
+                });
+
+            println!("👾 Waiting for a connection on interfaces...");
+            println!("{}", table_builder.build().with(Style::sharp()));
+        }
+    }
+
+    let mut stream = TcpListenerStream::new(listener);
+
+    // Print out the address we're listening on
     Ok(Framed::new(
-        listener
+        stream
             .try_next()
             .await?
             .ok_or_else(|| anyhow!("No incoming connections received on port {}", port))?,
@@ -317,7 +344,7 @@ async fn send(args: Send, quiet: bool) -> Result<()> {
 
     trace!("Sending files: {:?}", files);
 
-    let mut stream = listen_one(args.port, args.local).await?;
+    let mut stream = listen_one(args.port, args.local, quiet).await?;
 
     stream
         .send(Message::FileListing((
@@ -381,7 +408,7 @@ async fn send(args: Send, quiet: bool) -> Result<()> {
 
     drop(tx);
 
-    let bar = if quiet {
+    let bar = if !quiet {
         let style = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
         .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
         .progress_chars("#>-");
@@ -577,7 +604,7 @@ async fn receive(args: Receive, quiet: bool) -> Result<()> {
     let style = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] ({msg:<12.cyan/blue}) [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
         .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
         .progress_chars("#>-");
-    let bar = if quiet {
+    let bar = if !quiet {
         Some(MultiProgress::new())
     } else {
         None
@@ -914,7 +941,7 @@ mod tests {
             .unwrap();
 
         spawn(async move {
-            let mut lstream = listen_one(port, true).await.unwrap();
+            let mut lstream = listen_one(port, true, true).await.unwrap();
             let files = file_listing(test_file)
                 .await
                 .try_collect::<Vec<_>>()
@@ -954,7 +981,7 @@ mod tests {
             .unwrap();
 
         spawn(async move {
-            let mut lstream = listen_one(port, true).await.unwrap();
+            let mut lstream = listen_one(port, true, true).await.unwrap();
             let files = file_listing(&test_file)
                 .await
                 .try_collect::<Vec<_>>()
