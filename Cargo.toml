@@ -3,6 +3,9 @@ name = "rcopy"
 repository = "https://github.com/novafacing/rcopy"
 version = "0.1.0"
 edition = "2021"
+readme = "README.md"
+description = "A fast file and directory transfer tool powered by Tokio, RKYV, and io_uring"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -50,4 +53,9 @@ ci = ["github"]
 # The installers to generate for each app
 installers = ["shell"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+]
