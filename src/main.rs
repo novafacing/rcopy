@@ -72,12 +72,12 @@ impl LengthCodec for U64Length {
         if buf.len() < 8 {
             Err(NotEnoughBytesError)
         } else {
-            trace!("Decoding length from {:<24?}", buf);
+            trace!("Decoding length from buf len {}", buf.len());
             let bytes: [u8; 8] = buf[..8].try_into().map_err(|_| NotEnoughBytesError)?;
-            trace!("Decoded length bytes {:<24?}", bytes);
+            trace!("Decoded length bytes {:?}", bytes);
             let length = u64::from_be_bytes(bytes) as usize;
             let rest = &buf[8..];
-            debug!("Decoded length {} and rest {:<24?}", length, rest);
+            debug!("Decoded length {} and rest of len {}", length, rest.len());
             Ok((length, rest))
         }
     }
@@ -313,6 +313,8 @@ async fn send(args: Send) -> Result<()> {
         .try_collect::<Vec<_>>()
         .await?;
 
+    let total_size = files.iter().map(|fd| fd.size).sum::<u64>();
+
     trace!("Sending files: {:?}", files);
 
     let mut stream = listen_one(args.port, args.local).await?;
@@ -379,9 +381,17 @@ async fn send(args: Send) -> Result<()> {
 
     drop(tx);
 
+    let style = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
+        .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+        .progress_chars("#>-");
+    let progress_bar = ProgressBar::new(total_size).with_style(style);
+
     while let Some(file_chunk) = rx.recv().await {
+        progress_bar.inc(file_chunk.data.len() as u64);
         stream.send(Message::FileChunk(file_chunk)).await?;
     }
+
+    progress_bar.finish_and_clear();
 
     stream.send(Message::Done).await?;
 
@@ -555,8 +565,8 @@ async fn receive(args: Receive) -> Result<()> {
         })
         .collect::<Vec<_>>();
 
-    let m = MultiProgress::new();
-    let mstyle = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] ({msg:<12.cyan/blue}) [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
+    let multi_progress = MultiProgress::new();
+    let style = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] ({msg:<12.cyan/blue}) [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
         .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
         .progress_chars("#>-");
 
@@ -564,7 +574,7 @@ async fn receive(args: Receive) -> Result<()> {
         .1
         .iter()
         .map(|fd| {
-            let pb = m.add(ProgressBar::new(fd.size));
+            let pb = multi_progress.add(ProgressBar::new(fd.size));
             pb.set_message(
                 PathBuf::from(&fd.path)
                     .file_name()
@@ -572,7 +582,7 @@ async fn receive(args: Receive) -> Result<()> {
                     .to_string_lossy()
                     .into_owned(),
             );
-            pb.set_style(mstyle.clone());
+            pb.set_style(style.clone());
             (fd.identifier.clone(), pb)
         })
         .collect::<HashMap<FileIdentifier, ProgressBar>>();
@@ -590,7 +600,7 @@ async fn receive(args: Receive) -> Result<()> {
 
                     if file_chunk.data.is_empty() {
                         pb.finish_and_clear();
-                        m.remove(pb);
+                        multi_progress.remove(pb);
                     }
                 }
 
@@ -623,7 +633,7 @@ async fn receive(args: Receive) -> Result<()> {
         }
     });
 
-    m.clear()?;
+    multi_progress.clear()?;
 
     Ok(())
 }
