@@ -10,7 +10,6 @@ use std::{
     fmt::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    time::Instant,
 };
 use tokio::{
     fs::{create_dir_all, read_dir},
@@ -131,7 +130,9 @@ struct Args {
     command: Commands,
 }
 
-#[derive(Archive, Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
+#[derive(
+    Archive, Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Default,
+)]
 #[archive(check_bytes)] // check_bytes is required
 #[archive_attr(derive(Debug))]
 struct FileIdentifier {
@@ -141,12 +142,6 @@ struct FileIdentifier {
 impl FileIdentifier {
     fn new(identifier: u64) -> Self {
         Self { identifier }
-    }
-}
-
-impl Default for FileIdentifier {
-    fn default() -> Self {
-        Self { identifier: 0 }
     }
 }
 
@@ -345,7 +340,8 @@ async fn send(args: Send) -> Result<()> {
         .cloned()
         .map(|fd| {
             let tx = tx.clone();
-            let task = spawn_tokio_uring(async move {
+
+            spawn_tokio_uring(async move {
                 let file = File::open(fd.path.clone()).await?;
                 let mut offset = 0;
 
@@ -362,7 +358,7 @@ async fn send(args: Send) -> Result<()> {
                                 buffer[..read].to_vec(),
                             ))
                             .await
-                            .or_else(|e| Err(anyhow!("Failed to send file chunk: {}", e)))?;
+                            .map_err(|e| anyhow!("Failed to send file chunk: {}", e))?;
                             trace!("Sent file chunk of length {} for {}", read, fd.path);
                             offset += read as u64;
                         }
@@ -374,11 +370,10 @@ async fn send(args: Send) -> Result<()> {
 
                 tx.send(FileChunk::new(fd.identifier.clone(), offset, vec![]))
                     .await
-                    .or_else(|e| Err(anyhow!("Failed to send file chunk: {}", e)))?;
+                    .map_err(|e| anyhow!("Failed to send file chunk: {}", e))?;
 
                 Ok(())
-            });
-            task
+            })
         })
         .collect::<Vec<_>>();
 
@@ -464,7 +459,8 @@ async fn receive(args: Receive) -> Result<()> {
                 remote_path.display(),
                 prefix
             );
-            let task = spawn_tokio_uring(async move {
+
+            spawn_tokio_uring(async move {
                 let path = if let Some(prefix) = &prefix {
                     remote_path.join(PathBuf::from(fd.path.strip_prefix(prefix).unwrap()))
                 } else {
@@ -475,14 +471,14 @@ async fn receive(args: Receive) -> Result<()> {
 
                 let dir = path.parent().expect("File path has no parent");
 
-                create_dir_all(dir).await.or_else(|e| {
+                create_dir_all(dir).await.map_err(|e| {
                     error!("Failed to create directory {:?}: {}", dir, e);
-                    Err(anyhow!("Failed to create directory {:?}: {}", dir, e))
+                    anyhow!("Failed to create directory {:?}: {}", dir, e)
                 })?;
 
-                let file = File::create(&path).await.or_else(|e| {
+                let file = File::create(&path).await.map_err(|e| {
                     error!("Failed to create file {:?}: {}", path, e);
-                    Err(anyhow!("Failed to create file {:?}: {}", path, e))
+                    anyhow!("Failed to create file {:?}: {}", path, e)
                 })?;
 
                 debug!("Created file {:?}", path);
@@ -554,15 +550,10 @@ async fn receive(args: Receive) -> Result<()> {
                 }
 
                 Ok(())
-            });
-
-            task
+            })
         })
         .collect::<Vec<_>>();
 
-    let mut bytes_received = 0;
-
-    let start_time = Instant::now();
     let m = MultiProgress::new();
     let mstyle = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] ({msg:<12.cyan/blue}) [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
         .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
@@ -572,7 +563,7 @@ async fn receive(args: Receive) -> Result<()> {
         .1
         .iter()
         .map(|fd| {
-            let pb = m.add(ProgressBar::new(fd.size as u64));
+            let pb = m.add(ProgressBar::new(fd.size));
             pb.set_message(
                 PathBuf::from(&fd.path)
                     .file_name()
@@ -602,16 +593,14 @@ async fn receive(args: Receive) -> Result<()> {
                     }
                 }
 
-                bytes_received += file_chunk.data.len();
-
                 if let Some((tx, _)) = channels.get_mut(&file_chunk.identifier) {
                     let identifier = file_chunk.identifier.clone();
-                    tx.send(file_chunk).await.or_else(|e| {
-                        Err(anyhow!(
+                    tx.send(file_chunk).await.map_err(|e| {
+                        anyhow!(
                             "Failed to send file chunk for identifier {:?}: {}",
                             identifier,
                             e
-                        ))
+                        )
                     })?;
                 } else {
                     bail!("Received file chunk for unknown file identifier");
@@ -634,10 +623,6 @@ async fn receive(args: Receive) -> Result<()> {
     });
 
     m.clear()?;
-
-    let stop_time = Instant::now();
-
-    let duration = stop_time - start_time;
 
     Ok(())
 }
@@ -721,15 +706,15 @@ mod tests {
         }
 
         fn create(&self, params: &RandomDirectoryParameters) -> Result<()> {
-            match &*self {
+            match self {
                 RandomDirectoryEntry::Directory(dir) => {
                     trace!("Creating directory {:?}", dir);
-                    create_dir_all(&dir).map_err(|e| anyhow!("Failed to create {:?}: {}", dir, e))
+                    create_dir_all(dir).map_err(|e| anyhow!("Failed to create {:?}: {}", dir, e))
                 }
                 RandomDirectoryEntry::File(file) => {
                     trace!("Creating file {:?}", file);
                     let contents = random_string(params.max_file_size);
-                    let mut f = std::fs::File::create(&file)
+                    let mut f = std::fs::File::create(file)
                         .map_err(|e| anyhow!("Failed to create {:?}: {}", file, e))?;
                     write!(f, "{}", contents)
                         .map_err(|e| anyhow!("Failed to write {:?}: {}", file, e))
@@ -800,7 +785,7 @@ mod tests {
                         let entry = RandomDirectoryEntry::random_in(current_dir, &params);
 
                         let entry_id = tree
-                            .insert(Node::new(entry.clone()), InsertBehavior::UnderNode(&top))
+                            .insert(Node::new(entry.clone()), InsertBehavior::UnderNode(top))
                             .unwrap();
 
                         if let RandomDirectoryEntry::Directory(_) = entry {
@@ -814,22 +799,19 @@ mod tests {
                         let children = tree.get(top).unwrap().children();
                         // Get all the children that are directories
                         let dirs = children
-                            .into_iter()
+                            .iter()
                             .filter(|node| {
-                                if let RandomDirectoryEntry::Directory(_) =
-                                    tree.get(node).unwrap().data()
-                                {
-                                    true
-                                } else {
-                                    false
-                                }
+                                matches!(
+                                    tree.get(node).unwrap().data(),
+                                    RandomDirectoryEntry::Directory(_)
+                                )
                             })
                             .collect::<Vec<_>>();
                         if dirs.is_empty() {
                             // Create a directory and enter it
                             let dir = RandomDirectoryEntry::dir_in(current_dir, &params);
                             let dir_id = tree
-                                .insert(Node::new(dir.clone()), InsertBehavior::UnderNode(&top))
+                                .insert(Node::new(dir.clone()), InsertBehavior::UnderNode(top))
                                 .unwrap();
                             stack.push(dir_id);
                         } else {
@@ -971,13 +953,13 @@ mod tests {
         let port = rng.gen_range(1024..65535);
 
         let sender_runtime = {
-            let port = port.clone();
+            let port = port;
             spawn_thread(move || {
                 start_tokio_uring(async {
                     let sender_args = Send {
                         local_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                             .join("tests/test_directory/1"),
-                        port: port,
+                        port,
                         local: true,
                     };
                     send(sender_args).await
@@ -1034,12 +1016,12 @@ mod tests {
         let port = rng.gen_range(1024..65535);
 
         let sender_runtime = {
-            let port = port.clone();
+            let port = port;
             spawn_thread(move || {
                 start_tokio_uring(async {
                     let sender_args = Send {
                         local_path: dir_path,
-                        port: port,
+                        port,
                         local: true,
                     };
                     send(sender_args).await
@@ -1086,13 +1068,13 @@ mod tests {
         let dir_path = dir.path().to_path_buf();
 
         let sender_runtime = {
-            let port = port.clone();
+            let port = port;
             spawn_thread(move || {
                 start_tokio_uring(async {
                     let sender_args = Send {
                         local_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                             .join("tests/test_directory/1"),
-                        port: port,
+                        port,
                         local: true,
                     };
                     send(sender_args).await
@@ -1101,7 +1083,7 @@ mod tests {
             })
         };
         let receiver_runtime = {
-            let port = port.clone();
+            let port = port;
             let dir_path = dir_path.clone();
             spawn_thread(move || {
                 start_tokio_uring(async {
@@ -1158,13 +1140,13 @@ mod tests {
         rd.create().unwrap();
 
         let sender_runtime = {
-            let port = port.clone();
+            let port = port;
             let rand_dir_path = rand_dir_path.clone();
             spawn_thread(move || {
                 start_tokio_uring(async {
                     let sender_args = Send {
                         local_path: rand_dir_path,
-                        port: port,
+                        port,
                         local: true,
                     };
                     send(sender_args).await
@@ -1173,7 +1155,7 @@ mod tests {
             })
         };
         let receiver_runtime = {
-            let port = port.clone();
+            let port = port;
             let dir_path = dir_path.clone();
             spawn_thread(move || {
                 start_tokio_uring(async {
@@ -1222,7 +1204,7 @@ mod tests {
                 start_tokio_uring(async {
                     let sender_args = Send {
                         local_path: rand_dir_path,
-                        port: port,
+                        port,
                         local: true,
                     };
                     send(sender_args).await
@@ -1231,7 +1213,7 @@ mod tests {
             })
         };
         let receiver_runtime = {
-            let port = port.clone();
+            let port = port;
             let dir_path = dir_path.clone();
             spawn_thread(move || {
                 start_tokio_uring(async {
