@@ -383,6 +383,10 @@ async fn send(args: Send) -> Result<()> {
         stream.send(Message::FileChunk(file_chunk)).await?;
     }
 
+    // Pull all values out of rx and discard them to avoid memory leaks
+    rx.close();
+    while (rx.recv().await).is_some() {}
+
     stream.send(Message::Done).await?;
 
     join_all(tasks).await.iter().for_each(|r| {
@@ -451,6 +455,7 @@ async fn receive(args: Receive) -> Result<()> {
         .cloned()
         .map(|fd| {
             let mut rx = channels.get_mut(&fd.identifier).unwrap().1.take().unwrap();
+
             let prefix = prefix.clone();
             let remote_path = args.remote_path.clone();
             trace!(
@@ -548,6 +553,11 @@ async fn receive(args: Receive) -> Result<()> {
                         }
                     }
                 }
+
+                rx.close();
+
+                // Pull all values out of rx and discard them to avoid memory leaks
+                while (rx.recv().await).is_some() {}
 
                 Ok(())
             })
