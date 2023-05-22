@@ -25,7 +25,7 @@ be smaller than GPT-4 but the file is still pretty huge!) you want to copy, run:
 rcopy send ~/hub/models
 ```
 
-[![asciicast](https://asciinema.org/a/9kuAbjeIcXDPiCisptxlAU96S.svg)](https://asciinema.org/a/9kuAbjeIcXDPiCisptxlAU96S)
+![send](demo/send.gif)
 
 On the machine you want the files to copy to (we'll copy them to
 `~/Downloads/models-copy/`), run:
@@ -34,7 +34,7 @@ On the machine you want the files to copy to (we'll copy them to
 rcopy receive -a 192.168.0.185:3120 ~/Downloads/models-copy/
 ```
 
-[![asciicast](https://asciinema.org/a/jZNm0jeb6bOzGmvYzxE3LpCj6.svg)](https://asciinema.org/a/jZNm0jeb6bOzGmvYzxE3LpCj6)
+![receive](demo/receive.gif)
 
 ## More Options
 
