@@ -36,23 +36,21 @@ rcopy receive -a 192.168.0.185:3120 ~/Downloads/models-copy/
 
 ![receive](demo/receive.gif)
 
-## More Options
-
-There are a few knobs to twist, for example 
-
 ## FAQ
 
-Q: Is this secure?
-
-A: No! Secure your network, this is for moving big model files that you don't care about
-   from one machine to another. In the future, I plan on adding an encrypted mode
-   that'll use the SSH keys already on your machines to negotiate AES.
-
-Q: What's the use case for this?
+**Q**: What's the use case for this?
 
 A: Already mentioned above, but I literally am tired of moving Linux ISOs and 9GB ggml
-   files between my machines. I realized SFTP and RSync are horrifically slow, so I
-   figured it'd be fun to make my own.
+files between my machines. I realized SFTP and RSync are horrifically slow, so I figured
+it'd be fun to make my own.
+
+**Q**: Is this secure?
+
+**A**: No! Secure your network, this is for moving big model files that you don't care about
+from one machine to another (or Linux ISOs, or whatever). In the future, I plan on
+adding an encrypted mode that'll use the SSH keys already on your machines to negotiate
+AES.
+
 
 ## Planned Features
 
