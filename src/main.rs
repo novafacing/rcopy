@@ -306,7 +306,7 @@ async fn listen_one(port: u16, local: bool) -> Result<Framed<TcpStream, MessageC
 
 /// Listen for one incoming connection on the given port and send the given file or directory
 /// over the connection.
-async fn send(args: Send) -> Result<()> {
+async fn send(args: Send, quiet: bool) -> Result<()> {
     // TODO: This isn't a good idea if the file listing is so large we can't hold it in memory
     let files = file_listing(&args.local_path)
         .await
@@ -381,17 +381,26 @@ async fn send(args: Send) -> Result<()> {
 
     drop(tx);
 
-    let style = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
+    let bar = if quiet {
+        let style = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
         .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
         .progress_chars("#>-");
-    let progress_bar = ProgressBar::new(total_size).with_style(style);
+        Some(ProgressBar::new(total_size).with_style(style))
+    } else {
+        None
+    };
 
     while let Some(file_chunk) = rx.recv().await {
-        progress_bar.inc(file_chunk.data.len() as u64);
+        if let Some(bar) = bar.as_ref() {
+            bar.inc(file_chunk.data.len() as u64);
+        }
+
         stream.send(Message::FileChunk(file_chunk)).await?;
     }
 
-    progress_bar.finish_and_clear();
+    if let Some(bar) = bar {
+        bar.finish_and_clear();
+    }
 
     stream.send(Message::Done).await?;
 
@@ -431,7 +440,7 @@ async fn connect(address: SocketAddr) -> Result<Framed<TcpStream, MessageCodec>>
     Retry::spawn(strategy, || connect_one(address)).await
 }
 
-async fn receive(args: Receive) -> Result<()> {
+async fn receive(args: Receive, quiet: bool) -> Result<()> {
     let mut stream = connect(args.address).await?;
 
     let mut files = if let Message::FileListing(file_listing) = stream
@@ -565,27 +574,35 @@ async fn receive(args: Receive) -> Result<()> {
         })
         .collect::<Vec<_>>();
 
-    let multi_progress = MultiProgress::new();
     let style = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] ({msg:<12.cyan/blue}) [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
         .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
         .progress_chars("#>-");
+    let bar = if quiet {
+        Some(MultiProgress::new())
+    } else {
+        None
+    };
 
     let pbs = files
         .1
         .iter()
         .map(|fd| {
-            let pb = multi_progress.add(ProgressBar::new(fd.size));
-            pb.set_message(
-                PathBuf::from(&fd.path)
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-            pb.set_style(style.clone());
-            (fd.identifier.clone(), pb)
+            if let Some(bar) = bar.as_ref() {
+                let pb = bar.add(ProgressBar::new(fd.size));
+                pb.set_message(
+                    PathBuf::from(&fd.path)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                pb.set_style(style.clone());
+                (fd.identifier.clone(), Some(pb))
+            } else {
+                (fd.identifier.clone(), None)
+            }
         })
-        .collect::<HashMap<FileIdentifier, ProgressBar>>();
+        .collect::<HashMap<FileIdentifier, Option<ProgressBar>>>();
 
     loop {
         let message = stream.try_next().await?;
@@ -595,12 +612,15 @@ async fn receive(args: Receive) -> Result<()> {
                 bail!("Received unexpected file listing");
             }
             Some(Message::FileChunk(file_chunk)) => {
-                if let Some(pb) = pbs.get(&file_chunk.identifier) {
+                if let Some(Some(pb)) = pbs.get(&file_chunk.identifier) {
                     pb.inc(file_chunk.data.len() as u64);
 
                     if file_chunk.data.is_empty() {
                         pb.finish_and_clear();
-                        multi_progress.remove(pb);
+
+                        if let Some(bar) = bar.as_ref() {
+                            bar.remove(pb);
+                        }
                     }
                 }
 
@@ -633,7 +653,9 @@ async fn receive(args: Receive) -> Result<()> {
         }
     });
 
-    multi_progress.clear()?;
+    if let Some(bar) = bar.as_ref() {
+        bar.clear()?;
+    }
 
     Ok(())
 }
@@ -649,9 +671,9 @@ fn main() -> Result<()> {
 
     start_tokio_uring(async {
         if let Commands::Send(send_args) = args.command {
-            send(send_args).await?;
+            send(send_args, args.quiet).await?;
         } else if let Commands::Receive(receive_args) = args.command {
-            receive(receive_args).await?;
+            receive(receive_args, args.quiet).await?;
         }
         Ok(())
     })
@@ -977,7 +999,7 @@ mod tests {
                         port,
                         local: true,
                     };
-                    send(sender_args).await
+                    send(sender_args, true).await
                 })
                 .expect("Sender failed");
             })
@@ -1039,7 +1061,7 @@ mod tests {
                         port,
                         local: true,
                     };
-                    send(sender_args).await
+                    send(sender_args, true).await
                 })
                 .expect("Sender failed");
             })
@@ -1092,7 +1114,7 @@ mod tests {
                         port,
                         local: true,
                     };
-                    send(sender_args).await
+                    send(sender_args, true).await
                 })
                 .expect("Sender failed");
             })
@@ -1106,7 +1128,7 @@ mod tests {
                         remote_path: dir_path,
                         address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port),
                     };
-                    receive(receiver_args).await
+                    receive(receiver_args, true).await
                 })
                 .expect("Receiver failed");
             })
@@ -1164,7 +1186,7 @@ mod tests {
                         port,
                         local: true,
                     };
-                    send(sender_args).await
+                    send(sender_args, true).await
                 })
                 .expect("Sender failed");
             })
@@ -1178,7 +1200,7 @@ mod tests {
                         remote_path: dir_path,
                         address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port),
                     };
-                    receive(receiver_args).await
+                    receive(receiver_args, true).await
                 })
                 .expect("Receiver failed");
             })
@@ -1220,7 +1242,7 @@ mod tests {
                         port,
                         local: true,
                     };
-                    send(sender_args).await
+                    send(sender_args, true).await
                 })
                 .expect("Sender failed");
             })
@@ -1234,7 +1256,7 @@ mod tests {
                         remote_path: dir_path,
                         address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port),
                     };
-                    receive(receiver_args).await
+                    receive(receiver_args, true).await
                 })
                 .expect("Receiver failed");
             })
