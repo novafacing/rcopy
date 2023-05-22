@@ -27,6 +27,6 @@ unsigned-varint = { version = "0.7.1", features = ["futures"] }
 
 [dev-dependencies]
 id_tree = "1.8.0"
-rand = "0.8.5"
+rand = { version = "0.8.5", features = ["small_rng"] }
 tempfile = "3.5.0"
 tracing-test = "0.2.4"

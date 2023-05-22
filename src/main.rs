@@ -72,12 +72,12 @@ impl LengthCodec for U64Length {
         if buf.len() < 8 {
             Err(NotEnoughBytesError)
         } else {
-            // trace!("Decoding length from {:?}", buf);
+            trace!("Decoding length from {:<24?}", buf);
             let bytes: [u8; 8] = buf[..8].try_into().map_err(|_| NotEnoughBytesError)?;
-            // trace!("Decoded length bytes {:?}", bytes);
+            trace!("Decoded length bytes {:<24?}", bytes);
             let length = u64::from_be_bytes(bytes) as usize;
             let rest = &buf[8..];
-            // debug!("Decoded length {} and rest {:?}", length, rest);
+            debug!("Decoded length {} and rest {:<24?}", length, rest);
             Ok((length, rest))
         }
     }
@@ -120,7 +120,7 @@ enum Commands {
 /// Main command
 #[derive(Parser, Debug)]
 struct Args {
-    #[clap(short, long, default_value_t = Level::INFO)]
+    #[clap(short, long, default_value_t = Level::ERROR)]
     /// Logging level
     log_level: Level,
     #[clap(short, long, default_value_t = false)]
@@ -233,7 +233,7 @@ impl Decoder for MessageCodec {
     type Error = Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // debug!("Trying to decode message {:?}", src);
+        debug!("Trying to decode message {:<24?}", src);
 
         let mut length_buf = <U64Length as LengthCodec>::Buffer::default();
         let length_buf = <U64Length as LengthCodec>::as_slice(&mut length_buf);
@@ -255,7 +255,7 @@ impl Decoder for MessageCodec {
 
                 src.advance(length_buf.len());
                 src.advance(length);
-                // debug!("Decoded message: {:?}", message);
+                debug!("Decoded message: {:<24?}", message);
 
                 Ok(Some(message))
             }
@@ -276,7 +276,7 @@ impl Encoder<Message> for MessageCodec {
         dst.extend_from_slice(length_buf);
         dst.extend_from_slice(&message_bytes);
 
-        // debug!("Encoded message: {:?}", item);
+        debug!("Encoded message: {:<24?}", item);
 
         Ok(())
     }
@@ -382,10 +382,6 @@ async fn send(args: Send) -> Result<()> {
     while let Some(file_chunk) = rx.recv().await {
         stream.send(Message::FileChunk(file_chunk)).await?;
     }
-
-    // Pull all values out of rx and discard them to avoid memory leaks
-    rx.close();
-    while (rx.recv().await).is_some() {}
 
     stream.send(Message::Done).await?;
 
@@ -554,11 +550,6 @@ async fn receive(args: Receive) -> Result<()> {
                     }
                 }
 
-                rx.close();
-
-                // Pull all values out of rx and discard them to avoid memory leaks
-                while (rx.recv().await).is_some() {}
-
                 Ok(())
             })
         })
@@ -637,7 +628,6 @@ async fn receive(args: Receive) -> Result<()> {
     Ok(())
 }
 
-// #[tokio::main]
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -661,7 +651,7 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use id_tree::{InsertBehavior, Node, NodeId, Tree, TreeBuilder};
-    use rand::{distributions::Alphanumeric, thread_rng, Rng};
+    use rand::{distributions::Alphanumeric, rngs::SmallRng, thread_rng, Rng, SeedableRng};
     use std::{
         fs::create_dir_all,
         io::{Read, Write},
@@ -672,8 +662,8 @@ mod tests {
     use tracing_test::traced_test;
 
     fn random_string(max_length: usize) -> String {
-        thread_rng()
-            .sample_iter(&Alphanumeric)
+        let rng = SmallRng::from_entropy();
+        rng.sample_iter(&Alphanumeric)
             .take(thread_rng().gen_range(1..max_length))
             .map(char::from)
             .collect()
@@ -722,11 +712,16 @@ mod tests {
                     create_dir_all(dir).map_err(|e| anyhow!("Failed to create {:?}: {}", dir, e))
                 }
                 RandomDirectoryEntry::File(file) => {
-                    trace!("Creating file {:?}", file);
+                    trace!(
+                        "Creating file {:?} with max size {}",
+                        file,
+                        params.max_file_size
+                    );
                     let contents = random_string(params.max_file_size);
+                    trace!("Actual file size: {}", contents.len());
                     let mut f = std::fs::File::create(file)
                         .map_err(|e| anyhow!("Failed to create {:?}: {}", file, e))?;
-                    write!(f, "{}", contents)
+                    f.write_all(contents.as_bytes())
                         .map_err(|e| anyhow!("Failed to write {:?}: {}", file, e))
                 }
             }
@@ -1151,7 +1146,7 @@ mod tests {
 
         let sender_runtime = {
             let port = port;
-            let rand_dir_path = rand_dir_path.clone();
+            let rand_dir_path = rand_dir_path;
             spawn_thread(move || {
                 start_tokio_uring(async {
                     let sender_args = Send {
@@ -1166,7 +1161,7 @@ mod tests {
         };
         let receiver_runtime = {
             let port = port;
-            let dir_path = dir_path.clone();
+            let dir_path = dir_path;
             spawn_thread(move || {
                 start_tokio_uring(async {
                     let receiver_args = Receive {
@@ -1181,12 +1176,10 @@ mod tests {
 
         receiver_runtime.join().unwrap();
         sender_runtime.join().unwrap();
-        println!("Transferring from: {:?}", rand_dir_path);
-        println!("Transferring to: {:?}", dir_path);
-        std::thread::sleep(std::time::Duration::from_secs(15));
     }
 
     #[tokio::test]
+    #[traced_test]
     async fn test_bench_recv_dir() {
         let mut rng = thread_rng();
         let port = rng.gen_range(1024..65535);
@@ -1208,8 +1201,8 @@ mod tests {
         rd.create().unwrap();
 
         let sender_runtime = {
-            let port = port.clone();
-            let rand_dir_path = rand_dir_path.clone();
+            let port = port;
+            let rand_dir_path = rand_dir_path;
             spawn_thread(move || {
                 start_tokio_uring(async {
                     let sender_args = Send {
@@ -1224,7 +1217,7 @@ mod tests {
         };
         let receiver_runtime = {
             let port = port;
-            let dir_path = dir_path.clone();
+            let dir_path = dir_path;
             spawn_thread(move || {
                 start_tokio_uring(async {
                     let receiver_args = Receive {
@@ -1239,8 +1232,5 @@ mod tests {
 
         receiver_runtime.join().unwrap();
         sender_runtime.join().unwrap();
-        println!("Transferring from: {:?}", rand_dir_path);
-        println!("Transferring to: {:?}", dir_path);
-        std::thread::sleep(std::time::Duration::from_secs(15));
     }
 }
