@@ -14,7 +14,17 @@ If you know how to make it faster, please PR!
 
 ## Install
 
-Install with `cargo install rcopy`
+Install with `cargo`:
+
+```sh
+cargo install rcopy
+```
+
+Or you can install the prebuilt binaries using your shell (`cargo-dist` helpfully creates Windows and MacOS binaries, but I don't think they will work yet!):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/novafacing/rcopy/releases/download/v0.1.0/rcopy-installer.sh | sh
+```
 
 ## Run
 
