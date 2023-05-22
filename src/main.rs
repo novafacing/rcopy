@@ -15,7 +15,7 @@ use std::{
 use tokio::{
     fs::{create_dir_all, read_dir},
     net::{TcpListener, TcpStream},
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{channel, Receiver, Sender},
 };
 use tokio_retry::{
     strategy::{jitter, ExponentialBackoff},
@@ -33,6 +33,11 @@ use tracing_subscriber::FmtSubscriber;
 const FILE_READBUF_SIZE: usize = 1024 * 8;
 const CONNECT_RETRY_MILLIS: u64 = 100;
 const CONNECT_RETRY_TIMES: usize = 10;
+/// Channel size is the number of chunks from the network waiting to be written to disk
+/// per file so it is significantly smaller than the receiver channel size
+const RECEIVER_CHANNEL_SIZE: usize = 16;
+// Channel size is the number of chunks from disk waiting to be sent over the network
+const SENDER_CHANNEL_SIZE: usize = 256;
 
 /// Length encoding trait, allows for different kinds of length encoding
 pub trait LengthCodec: 'static {
@@ -332,7 +337,8 @@ async fn send(args: Send) -> Result<()> {
             files.clone(),
         )))
         .await?;
-    let (tx, mut rx) = unbounded_channel::<FileChunk>();
+
+    let (tx, mut rx) = channel::<FileChunk>(SENDER_CHANNEL_SIZE);
 
     let tasks = files
         .iter()
@@ -355,6 +361,7 @@ async fn send(args: Send) -> Result<()> {
                                 offset,
                                 buffer[..read].to_vec(),
                             ))
+                            .await
                             .or_else(|e| Err(anyhow!("Failed to send file chunk: {}", e)))?;
                             trace!("Sent file chunk of length {} for {}", read, fd.path);
                             offset += read as u64;
@@ -366,6 +373,7 @@ async fn send(args: Send) -> Result<()> {
                 }
 
                 tx.send(FileChunk::new(fd.identifier.clone(), offset, vec![]))
+                    .await
                     .or_else(|e| Err(anyhow!("Failed to send file chunk: {}", e)))?;
 
                 Ok(())
@@ -436,16 +444,10 @@ async fn receive(args: Receive) -> Result<()> {
         .iter()
         .map(|fd| {
             let identifier = fd.identifier.clone();
-            let (tx, rx) = unbounded_channel::<FileChunk>();
+            let (tx, rx) = channel::<FileChunk>(RECEIVER_CHANNEL_SIZE);
             (identifier, (tx, Some(rx)))
         })
-        .collect::<HashMap<
-            FileIdentifier,
-            (
-                UnboundedSender<FileChunk>,
-                Option<UnboundedReceiver<FileChunk>>,
-            ),
-        >>();
+        .collect::<HashMap<FileIdentifier, (Sender<FileChunk>, Option<Receiver<FileChunk>>)>>();
 
     let prefix = files.0.take();
     let tasks = files
@@ -604,7 +606,7 @@ async fn receive(args: Receive) -> Result<()> {
 
                 if let Some((tx, _)) = channels.get_mut(&file_chunk.identifier) {
                     let identifier = file_chunk.identifier.clone();
-                    tx.send(file_chunk).or_else(|e| {
+                    tx.send(file_chunk).await.or_else(|e| {
                         Err(anyhow!(
                             "Failed to send file chunk for identifier {:?}: {}",
                             identifier,
