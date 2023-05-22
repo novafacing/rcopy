@@ -1,5 +1,6 @@
 [package]
 name = "rcopy"
+repository = "https://github.com/novafacing/rcopy"
 version = "0.1.0"
 edition = "2021"
 
